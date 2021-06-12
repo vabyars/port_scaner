@@ -1,58 +1,50 @@
 import socket
 from concurrent.futures import ThreadPoolExecutor
-import struct
 
 from argparser import Args
+import packages
 
-PACKET = b'\x13' + b'\x00' * 39 + b'\x6f\x89\xe9\x1a\xb6\xd5\x3b\xd3'
-DNS_TRANSACTION_ID = PACKET[:2]
-SNTP_TIMESTAMP = PACKET[-8:]
+recognizers = [(packages.build_http_packet, packages.is_http_package, "HTTP"),
+               (packages.build_smtp_packet, packages.is_smtp_package, "SMTP"),
+               (packages.build_pop3_packet, packages.is_pop3_package, "POP3"),
+               (packages.build_dns_package, packages.is_dns_package, "DNS"),
+               (packages.build_ntp_packet, packages.is_ntp_package, "SNTP")]
 
 
-def define_protocol(data):
-    if b'HTTP' in data:
-        return "HTTP"
-    if DNS_TRANSACTION_ID in data:
-        return "DNS"
-    if data[:3].isdigit():
-        return "SMTP"
-    if data.startswith(b'+'):
-        return "POP3"
-    if is_sntp(data):
-        return "SNTP"
-    return "Undefined protocol"
+def scan_application_layer(sock):
+    for builder, recognizer, answer in recognizers:
+        try:
+            sock.settimeout(0.05)
+            sock.send(builder())
+            response = sock.recv(2048)
+            if recognizer(response):
+                return answer
+        except:
+            pass
 
 
 def scan_udp(host, port):
     socket.setdefaulttimeout(3)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as scanner:
         try:
-            scanner.sendto(PACKET, (host, port))
-            data, _ = scanner.recvfrom(1024)
-            return f'UDP {port} {define_protocol(data)}'
-        except socket.error:
+            udp_connect = scanner.connect_ex((host, port))
+
+            if udp_connect == 0:
+                application_layer = scan_application_layer(scanner)
+                if application_layer:
+                    return f'UDP {port} {application_layer if application_layer else ""}'
+        except socket.error as e:
             pass
-
-
-def is_sntp(packet):
-    origin_timestamp = packet[24:32]
-    is_packet_from_server = 7 & packet[0] == 4
-    return len(packet) >= 48 and \
-           is_packet_from_server and \
-           origin_timestamp == SNTP_TIMESTAMP
 
 
 def scan_tcp(host, port):
     socket.setdefaulttimeout(0.5)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         try:
-            s.connect((host, port))
-        except (socket.timeout, TimeoutError, OSError):
-            pass
-        try:
-            s.send(struct.pack('!H', len(PACKET)) + PACKET)
-            data = s.recv(1024)
-            return f"TCP {port} {define_protocol(data)}"
+            tcp_connect = s.connect_ex((host, port))
+            if tcp_connect == 0:
+                application_layer = scan_application_layer(s)
+                return f'TCP {port} {application_layer if application_layer else ""}'
         except socket.error:
             pass
 
